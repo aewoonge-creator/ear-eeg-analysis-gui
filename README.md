@@ -1,38 +1,70 @@
 # EEG Analysis Lab
 
-CSV-based EEG analysis GUI for ADS1299 / ear-EEG experiments.
+## [웹 GUI 바로 열기](https://aewoonge-creator.github.io/ear-eeg-analysis-gui/)
 
-## Features
+[ADS1299 측정 GUI](https://aewoonge-creator.github.io/ads1299-nrf54-ble-eeg/)에서 측정을 마치고 저장한 CSV를 분석하는 웹 GUI입니다. CSV는 브라우저 안에서 처리되며 서버에 업로드되지 않습니다.
 
-- Load EEG CSV files directly in the browser
-- Detect numeric EEG channels from the CSV header
-- Estimate or manually set sampling rate
-- Optional ADS1299 count-to-uV conversion
-- Band-pass filtering and 50/60 Hz notch filtering
-- Raw, filtered, FFT, PSD, and relative band-power plots
-- Delta, theta, alpha, beta, and gamma power summary
-- Export analysis summary as CSV
+## 사용 방법
 
-## CSV Format
+1. 측정 GUI에서 CSV를 저장합니다. **CSV+설정**으로 저장하면 샘플링 Hz와 채널별 Gain도 읽을 수 있습니다.
+2. 위 **웹 GUI 바로 열기** 링크에서 CSV 파일을 선택합니다.
+3. Ch1~8을 자동으로 분석하고 채널별 Welch PSD, 전체 채널 **PSD 평균**, **PSD 합계**를 표시합니다.
+4. 표시할 채널을 선택하면 Raw / Filtered / FFT / Welch PSD / Relative Power를 확인할 수 있습니다.
+5. **전체 채널 요약 CSV** 또는 **Welch PSD CSV 저장**으로 결과를 내려받습니다. PSD CSV는 0 Hz부터 Nyquist까지 모든 주파수 bin을 포함합니다. 화면은 0~45 Hz(또는 Nyquist)입니다.
 
-Recommended format:
+## Welch PSD와 전체 채널 분석
+
+- 선택한 구간 길이, periodic Hann 창, 50% 중첩, 구간별 평균 제거, 단측 power spectral density를 사용합니다. 단위는 `uV²/Hz` 또는 `count²/Hz`입니다.
+- 기본 구간 길이는 1024샘플입니다. 샘플링 250 Hz이면 구간 4.096초, 주파수 간격 약 0.244 Hz입니다. 더 긴 구간은 주파수 분해능이 좋아지지만 더 많은 연속 샘플이 필요합니다.
+- CSV가 설정 구간보다 짧으면 파일 행 수 이하의 가장 큰 2의 거듭제곱으로 자동 축소합니다. 최소 8샘플이 필요합니다. 매우 짧은 기록은 주파수 분해능이 낮습니다.
+- 전체 기록의 모든 완전한 구간을 평균합니다. 마지막 나머지가 있으면 마지막 샘플에서 끝나는 구간을 추가합니다. 이 마지막 구간의 중첩은 50%보다 클 수 있습니다. 일반적인 Welch 구현의 나머지 버림 방식과 차이가 있습니다.
+- **전체 평균** = 유효한 각 채널 PSD의 산술평균, **전체 합계** = 유효한 각 채널 PSD의 합입니다. 파형을 먼저 더하거나 평균한 뒤 PSD를 구하는 방식이 아니므로 채널 간 위상 상쇄가 발생하지 않습니다.
+- CSV에 존재하고 완전한 분석 구간이 있는 채널만 전체 결과에 포함합니다. 결측이 있으면 채널마다 사용한 구간이 다를 수 있습니다. 포함 채널과 채널별 사용 샘플·구간 수를 화면에 표시합니다.
+- 빈 값, 비수치 값, 열 수가 잘못된 행, 기존 ADS1299 무효값 `-8388608`에서 구간을 나눕니다. 시간 역행·중복 또는 기대 간격의 1.5배를 넘는 시간 끊김에서도 구간과 필터 상태를 초기화합니다. 끊김 양쪽 데이터를 이어 붙이거나 보간하지 않습니다. 구간 길이에 못 미치는 조각은 PSD에서 제외하며 제외 샘플 수를 표시합니다. `-8388608`이 실제 음의 full-scale 포화값인 경우에도 이 분석기에서는 제외합니다.
+
+## 긴 CSV
+
+파일 길이에 따른 고정된 초/분/행 제한은 없습니다. 파일을 1 MiB씩 두 번 읽어 먼저 형식·Hz·길이를 확인하고, Web Worker에서 모든 채널의 PSD를 누적 계산합니다. 전체 파일이나 채널별 전체 파형을 메모리에 보관하지 않습니다. **진행률과 취소**를 지원합니다.
+
+Raw/Filtered 파형은 처음 지정한 시간만, 최대 20,000샘플까지 표시합니다. FFT는 첫 연속 구간만 표시합니다. 이 미리보기 제한은 **전체 기록 Welch PSD에 영향을 주지 않습니다**. 계산 시간은 파일 크기에 비례하며 브라우저·PC 자원에 따라 처리 가능한 크기와 속도는 달라집니다. `N / Hz` 길이는 샘플 기준이며 끊김을 포함한 실제 경과 시간과 다를 수 있습니다.
+
+## 측정 CSV 호환성
+
+현재 웹 측정 GUI의 `t_us`와 기존 `t_ms`, PC GUI의 `pc_time_s,t_ms,ch1,...,ch8`을 지원합니다. 시간 열은 EEG 채널에서 제외하며 Ch1~8(또는 channel1~8, EEG1~8)만 감지합니다. 파일에 일부 채널만 있어도 분석할 수 있습니다.
 
 ```csv
-# fs=250
-t_ms,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8
-0,123,-45,67,0,0,0,0,0
-4,128,-42,70,0,0,0,0,0
+# actual_saved_rate_hz=250
+# ads_gain=24
+# ads_channel_gains=ch1:24 ch2:24 ch3:24 ch4:24 ch5:24 ch6:24 ch7:24 ch8:24
+t_us,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8
+0,123,-45,67,10,11,12,13,14
+4000,128,-42,70,11,12,13,14,15
 ```
 
-Metadata lines beginning with `#` are optional. If `fs`, `sample_rate_hz`, or
-`actual_saved_rate_hz` is present, the GUI uses it as the initial sampling rate.
+위 예시는 헤더 형식을 보여주는 두 행입니다. 실제 분석에는 최소 8행을 사용하세요.
 
-## Run Locally
+Hz 자동 설정 우선순위는 `actual_saved_rate_hz`, `fs`, `sample_rate`, `sample_rate_hz`, `sampling_rate_hz`, 시간 간격 중앙값, 입력한 Hz입니다. 시간 추정은 첫 5,000행에서 계산합니다. 마이크로초·밀리초·초를 구분하고 PC 수신 시각보다 장치 시각을 우선합니다. **Hz 자동 설정**을 끄면 수동 입력값을 사용합니다.
 
-Open `index.html` in a browser, or serve the folder:
+uV 변환은 `count × Vref / Gain / (2^23 − 1) × 10^6`입니다. CSV Gain 우선 적용 시 `ads_channel_gains` → `ads_gain` → 입력 Gain 순서로 사용합니다. 메타데이터가 없다면 측정 때 사용한 Gain과 Vref를 직접 맞추세요. 이미 uV인 CSV는 변환을 끄세요(이 경우 화면 단위 표기는 count이므로 실제 입력 단위에 맞게 해석해야 합니다).
+
+기본 필터는 1~40 Hz band-pass와 50/60 Hz notch입니다. 필터는 순방향 2차 biquad로 적용하며 zero-phase 필터가 아닙니다. Low/High 각각 0이면 해당 필터를 끕니다. notch는 Nyquist 미만인 주파수에만 적용합니다. 상대 대역 전력은 1~45 Hz 내 총 전력 기준입니다.
+
+## 로컬 실행 및 검증
+
+Web Worker를 사용하므로 파일을 더블클릭하는 대신 HTTP 서버에서 실행하세요.
 
 ```powershell
 python -m http.server 8765
 ```
 
-Then open `http://127.0.0.1:8765`.
+그다음 <http://127.0.0.1:8765>에 접속합니다. 외부 JavaScript 라이브러리 설치는 필요 없습니다.
+
+Node.js 22 이상에서 수치·CSV·긴 파일 회귀 테스트를 실행할 수 있습니다.
+
+```powershell
+node --test tests/*.test.cjs
+```
+
+## GitHub Pages
+
+저장소 **Settings → Pages → Deploy from a branch → main / (root)**로 배포합니다. README의 바로가기 링크는 이 Pages 주소를 사용합니다. 저장소 루트의 `.nojekyll`은 정적 파일을 그대로 제공하도록 합니다.

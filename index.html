@@ -30,20 +30,32 @@
           <input id="sampleRate" type="number" min="1" step="0.1" value="250">
         </label>
         <label>
-          분석 채널
+          표시할 채널 / 전체 PSD
           <select id="channelSelect"></select>
         </label>
         <label>
-          표시 시간 s
+          파형 미리보기 시간 s (PSD는 전체 기록)
           <input id="timeWindow" type="number" min="1" step="1" value="12">
         </label>
+        <label class="check-row">
+          <input id="autoRate" type="checkbox" checked>
+          <span>CSV 메타데이터 / 시간 열에서 Hz 자동 설정</span>
+        </label>
+        <label>
+          Welch 구간 길이 (samples)
+          <select id="segmentLength">
+            <option>8</option><option>16</option><option>32</option><option>64</option><option>128</option><option>256</option><option>512</option><option selected>1024</option><option>2048</option><option>4096</option><option>8192</option><option>16384</option>
+          </select>
+        </label>
+        <p class="help-text">Hann 창 · 50% 중첩 · 전체 기록. 짧은 파일은 구간 길이를 자동 축소합니다. 파형 미리보기는 최대 20,000샘플입니다.</p>
         <label>
           Band-pass Hz
           <div class="pair">
             <input id="lowCut" type="number" min="0" step="0.1" value="1">
-            <input id="highCut" type="number" min="1" step="0.5" value="40">
+            <input id="highCut" type="number" min="0" step="0.5" value="40">
           </div>
         </label>
+        <p class="help-text">필터의 0은 끄기입니다. 주파수는 샘플링 Hz의 절반 미만으로 설정하세요.</p>
         <label class="check-row">
           <input id="notchToggle" type="checkbox" checked>
           <span>50/60 Hz notch</span>
@@ -62,7 +74,13 @@
             <input id="gain" type="number" min="1" step="1" value="24">
           </label>
         </div>
+        <label class="check-row">
+          <input id="metadataGain" type="checkbox" checked>
+          <span>CSV 채널별 Gain 우선 적용 (없으면 입력값)</span>
+        </label>
         <button id="analyzeBtn" type="button">분석 실행</button>
+        <button id="cancelBtn" type="button" hidden>분석 취소</button>
+        <progress id="analysisProgress" max="100" value="0" hidden aria-label="분석 진행률"></progress>
       </section>
 
       <section class="panel">
@@ -75,14 +93,17 @@
       <div class="status-bar">
         <div>
           <strong id="statusTitle">CSV 대기 중</strong>
-          <span id="statusDetail">파일을 올리면 자동으로 분석합니다.</span>
+          <span id="statusDetail" role="status">파일을 올리면 모든 채널의 전체 기록을 자동으로 분석합니다.</span>
         </div>
-        <button id="exportBtn" type="button" disabled>요약 CSV 저장</button>
+        <div class="export-actions">
+          <button id="exportBtn" type="button" disabled>전체 채널 요약 CSV</button>
+          <button id="exportPsdBtn" type="button" disabled>Welch PSD CSV 저장</button>
+        </div>
       </div>
 
       <section class="metrics">
         <article>
-          <span>Duration</span>
+          <span>샘플 기준 길이 (N / Hz)</span>
           <strong id="metricDuration">-</strong>
         </article>
         <article>
@@ -104,10 +125,10 @@
       </section>
 
       <nav class="tabs" aria-label="plot tabs">
-        <button class="tab active" data-view="raw">Raw</button>
+        <button class="tab" data-view="raw">Raw</button>
         <button class="tab" data-view="filtered">Filtered</button>
         <button class="tab" data-view="fft">FFT</button>
-        <button class="tab" data-view="psd">PSD</button>
+        <button class="tab active" data-view="psd">Welch PSD</button>
         <button class="tab" data-view="power">Relative Power</button>
       </nav>
 
@@ -145,6 +166,11 @@
             </table>
           </div>
         </article>
+      </section>
+      <section class="all-channels" aria-labelledby="allChannelsTitle">
+        <h2 id="allChannelsTitle">Ch1~8 · 전체 채널 Welch PSD</h2>
+        <p id="aggregateNote" class="plot-note">각 채널의 PSD와 채널 PSD 평균·합계를 함께 표시합니다. 신호를 먼저 합산한 뒤 구한 PSD와는 다릅니다.</p>
+        <div id="channelPsdGrid" class="channel-psd-grid"></div>
       </section>
     </section>
   </main>
