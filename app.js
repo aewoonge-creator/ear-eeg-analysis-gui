@@ -177,6 +177,36 @@ function selected() {
   const r = state.result;
   return els.channelSelect.value === "mean" ? r.mean : els.channelSelect.value === "sum" ? r.sum : r.channels[Number(els.channelSelect.value)];
 }
+function ensureIndividualChannelForSignalView() {
+  if (!state.result || !["raw", "filtered", "fft"].includes(state.view) || /^\d+$/.test(els.channelSelect.value)) return;
+  const preferred = state.result.channels.findIndex(c => c.psd.segments > 0 && state.includedChannels.has(c.channelName));
+  const fallback = state.result.channels.findIndex(c => c.psd.segments > 0);
+  const index = preferred >= 0 ? preferred : fallback;
+  if (index >= 0) els.channelSelect.value = String(index);
+}
+function renderPlotChannelPicker() {
+  els.plotChannelPicker.replaceChildren();
+  els.plotChannelPicker.hidden = !state.result;
+  if (!state.result) return;
+  const label = document.createElement("span"); label.className = "plot-channel-label"; label.textContent = "채널";
+  els.plotChannelPicker.appendChild(label);
+  const aggregateView = ["psd", "power"].includes(state.view);
+  const choices = [
+    ...(aggregateView ? [["mean", "선택 평균"], ["sum", "선택 합계"]] : []),
+    ...state.result.channels.map((c, index) => [String(index), channelDisplayName(c.channelName), !c.psd.segments]),
+  ];
+  for (const [value, name, disabled] of choices) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "plot-channel-button";
+    button.textContent = name;
+    button.disabled = Boolean(disabled);
+    button.classList.toggle("active", els.channelSelect.value === value);
+    button.setAttribute("aria-pressed", String(els.channelSelect.value === value));
+    button.addEventListener("click", () => { els.channelSelect.value = value; render(); });
+    els.plotChannelPicker.appendChild(button);
+  }
+}
 function channelDisplayName(channelName) {
   const label = state.electrodeLabels[channelName];
   return label ? `${channelName} · ${label}` : channelName;
@@ -254,11 +284,14 @@ function bandPowerFromPsd(c, lo, hi) {
 function render() {
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === state.view));
   if (!state.result) {
+    renderPlotChannelPicker();
     clearCanvas(els.mainCanvas, "CSV를 선택하면 전체 기록을 분석합니다.");
     for (const name of ["Duration", "Fs", "Rms", "AlphaPeak", "MainBand"]) els[`metric${name}`].textContent = "-";
     els.mainPlotMeta.textContent = "-"; els.bandTableMeta.textContent = "분석 전"; els.bandTable.replaceChildren();
     return;
   }
+  ensureIndividualChannelForSignalView();
+  renderPlotChannelPicker();
   const r = state.result, c = selected();
   const ref = mainBandConfig();
   const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);

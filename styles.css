@@ -287,6 +287,39 @@ button:disabled {
   font-size: 17px;
 }
 
+.plot-channel-picker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  min-height: 34px;
+}
+
+.plot-channel-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-right: 2px;
+}
+
+.plot-channel-button {
+  min-height: 32px;
+  padding: 5px 10px;
+  background: #eef2f6;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.plot-channel-button.active {
+  background: var(--accent-3);
+  border-color: var(--accent-3);
+  color: #ffffff;
+}
+
 canvas {
   width: 100%;
   display: block;
