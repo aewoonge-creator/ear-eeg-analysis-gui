@@ -1,6 +1,13 @@
 "use strict";
-const state = { file: null, result: null, worker: null, view: "psd" };
+const state = { file: null, result: null, worker: null, view: "psd", electrodeLabels: {} };
 const els = Object.fromEntries(Array.from(document.querySelectorAll("[id]"), el => [el.id, el]));
+const BANDS = [
+  { name: "Delta", lo: 1, hi: 4 },
+  { name: "Theta", lo: 4, hi: 8 },
+  { name: "Alpha", lo: 8, hi: 13 },
+  { name: "Beta", lo: 13, hi: 30 },
+  { name: "Gamma", lo: 30, hi: 45 },
+];
 els.csvFile.addEventListener("change", () => {
   if (!els.csvFile.files[0]) return;
   state.file = els.csvFile.files[0];
@@ -15,11 +22,19 @@ els.cancelBtn.addEventListener("click", () => {
 els.channelSelect.addEventListener("change", render);
 els.exportBtn.addEventListener("click", exportSummary);
 els.exportPsdBtn.addEventListener("click", exportPsd);
+els.mainBandSelect.addEventListener("change", () => {
+  const band = BANDS.find(item => item.name === els.mainBandSelect.value);
+  if (band) { els.mainBandLow.value = band.lo; els.mainBandHigh.value = band.hi; }
+  render();
+});
+for (const input of [els.mainBandLow, els.mainBandHigh]) {
+  input.addEventListener("change", () => { els.mainBandSelect.value = "Custom"; render(); });
+}
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => { state.view = tab.dataset.view; render(); });
 }
 for (const input of document.querySelectorAll(".panel input, .panel select")) {
-  if (input.id === "channelSelect") continue;
+  if (["channelSelect", "mainBandSelect", "mainBandLow", "mainBandHigh"].includes(input.id)) continue;
   input.addEventListener("change", () => {
     if (!state.result) return;
     state.result = null; els.exportBtn.disabled = els.exportPsdBtn.disabled = true;
@@ -74,14 +89,27 @@ function analyze() {
 function fillChannels() {
   els.channelSelect.replaceChildren(); els.channelList.replaceChildren();
   const r = state.result;
-  for (const [value, name] of [["mean", "전체 채널 PSD 평균"], ["sum", "전체 채널 PSD 합계"], ...r.channels.map((c, i) => [String(i), c.channelName])]) {
+  for (const [value, name] of [["mean", "전체 채널 PSD 평균"], ["sum", "전체 채널 PSD 합계"], ...r.channels.map((c, i) => [String(i), channelDisplayName(c.channelName)])]) {
     const option = document.createElement("option"); option.value = value; option.textContent = name;
     if (/^\d+$/.test(value) && !r.channels[Number(value)].psd.segments) option.disabled = true;
     els.channelSelect.appendChild(option);
   }
   for (const c of r.channels) {
     const pill = document.createElement("div"); pill.className = "channel-pill";
-    pill.textContent = `${c.channelName}: ${c.psd.segments}구간 · ${c.psd.usedSamples.toLocaleString()}/${r.rows.toLocaleString()}샘플 · Gain ${c.gain}`;
+    const label = document.createElement("div"); label.className = "channel-pill-main";
+    label.innerHTML = `<strong>${escapeHtml(c.channelName)}</strong><span>${c.psd.segments}구간 · ${c.psd.usedSamples.toLocaleString()}/${r.rows.toLocaleString()}샘플 · Gain ${c.gain}</span>`;
+    const input = document.createElement("input");
+    input.className = "electrode-input";
+    input.type = "text";
+    input.placeholder = "전극명";
+    input.value = state.electrodeLabels[c.channelName] || "";
+    input.addEventListener("input", () => {
+      state.electrodeLabels[c.channelName] = input.value.trim();
+      refreshChannelLabels();
+      render();
+      renderChannelGrid();
+    });
+    pill.append(label, input);
     els.channelList.appendChild(pill);
   }
 }
@@ -89,22 +117,54 @@ function selected() {
   const r = state.result;
   return els.channelSelect.value === "mean" ? r.mean : els.channelSelect.value === "sum" ? r.sum : r.channels[Number(els.channelSelect.value)];
 }
+function channelDisplayName(channelName) {
+  const label = state.electrodeLabels[channelName];
+  return label ? `${channelName} · ${label}` : channelName;
+}
+function refreshChannelLabels() {
+  if (!state.result) return;
+  for (const option of els.channelSelect.options) {
+    if (/^\d+$/.test(option.value)) option.textContent = channelDisplayName(state.result.channels[Number(option.value)].channelName);
+  }
+}
+function selectedLabel(c = selected()) {
+  return c.aggregate ? c.channelName : channelDisplayName(c.channelName);
+}
+function mainBandConfig() {
+  const selectedBand = BANDS.find(b => b.name === els.mainBandSelect.value);
+  const lo = Number(els.mainBandLow.value), hi = Number(els.mainBandHigh.value);
+  const safeLo = Number.isFinite(lo) ? lo : selectedBand?.lo ?? 8;
+  const safeHi = Number.isFinite(hi) ? hi : selectedBand?.hi ?? 13;
+  return { name: selectedBand ? selectedBand.name : "Custom", lo: Math.min(safeLo, safeHi), hi: Math.max(safeLo, safeHi) };
+}
+function bandPowerFromPsd(c, lo, hi) {
+  if (!c?.psd?.freqs?.length || !c?.psd?.values?.length) return NaN;
+  let area = 0;
+  for (let i = 1; i < c.psd.freqs.length; i++) {
+    const f0 = c.psd.freqs[i - 1], f1 = c.psd.freqs[i];
+    if (f1 < lo || f0 > hi) continue;
+    area += ((c.psd.values[i - 1] + c.psd.values[i]) / 2) * (f1 - f0);
+  }
+  return area;
+}
 function render() {
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === state.view));
   if (!state.result) {
-    clearCanvas(els.mainCanvas, "CSV를 선택하면 전체 기록을 분석합니다."); clearCanvas(els.powerCanvas, "상대 power 대기 중");
-    for (const name of ["Duration", "Fs", "Rms", "AlphaPeak", "AlphaRel"]) els[`metric${name}`].textContent = "-";
+    clearCanvas(els.mainCanvas, "CSV를 선택하면 전체 기록을 분석합니다.");
+    for (const name of ["Duration", "Fs", "Rms", "AlphaPeak", "MainBand"]) els[`metric${name}`].textContent = "-";
     els.mainPlotMeta.textContent = "-"; els.bandTableMeta.textContent = "분석 전"; els.bandTable.replaceChildren();
     return;
   }
   const r = state.result, c = selected();
+  const ref = mainBandConfig();
+  const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);
   els.metricDuration.textContent = `${formatNumber(r.duration, 2)} s`;
   els.metricFs.textContent = `${formatNumber(r.fs, 3)} Hz`;
   els.metricRms.textContent = c.aggregate ? "채널 선택 시 표시" : `${formatNumber(c.rms, 2)} ${r.unit}`;
   els.metricAlphaPeak.textContent = `${formatNumber(c.alphaPeak.freq, 2)} Hz`;
-  els.metricAlphaRel.textContent = `${formatNumber(c.alpha.relative * 100, 1)}%`;
+  els.metricMainBand.textContent = `${formatNumber(refPower, 3)} ${r.unit}²`;
   const maxHz = Math.min(45, r.fs / 2);
-  els.mainPlotMeta.textContent = `${c.channelName} · ${r.segmentLength} samples/window · Δf ${formatNumber(r.frequencyResolution, 3)} Hz`;
+  els.mainPlotMeta.textContent = `${selectedLabel(c)} · ${r.segmentLength} samples/window · Δf ${formatNumber(r.frequencyResolution, 3)} Hz`;
   if (state.view === "psd") {
     els.mainPlotTitle.textContent = "Welch PSD · 전체 기록";
     drawLinePlot(els.mainCanvas, c.psd.freqs, c.psd.values, "Frequency (Hz)", `${r.unit}²/Hz`, "#1b998b", maxHz, true);
@@ -121,12 +181,12 @@ function render() {
     els.mainPlotTitle.textContent = `${state.view === "raw" ? "Raw" : "Filtered"} · 처음 ${formatNumber(values.length / r.fs, 2)}초 미리보기`;
     drawLinePlot(els.mainCanvas, values.map((_, i) => i / r.fs), values, "Time (s)", r.unit, "#0f8b8d");
   }
-  drawBars(els.powerCanvas, c.powers, true);
-  els.bandTableMeta.textContent = `${c.channelName} · 1-${maxHz} Hz 기준 · ${r.unit}²`;
+  els.bandTableMeta.textContent = `${selectedLabel(c)} · 기준 ${ref.name} ${ref.lo}-${ref.hi} Hz · ${r.unit}²`;
   els.bandTable.replaceChildren();
   for (const b of c.powers) {
     const tr = document.createElement("tr");
-    for (const value of [b.name, `${b.lo}-${b.hi}`, formatNumber(b.power, 4), `${formatNumber(b.relative * 100, 2)}%`]) {
+    const ratio = refPower > 0 ? b.power / refPower : NaN;
+    for (const value of [b.name, `${b.lo}-${b.hi}`, formatNumber(b.power, 4), `${formatNumber(b.relative * 100, 2)}%`, `${formatNumber(ratio, 3)}x`]) {
       const td = document.createElement("td"); td.textContent = value; tr.appendChild(td);
     }
     els.bandTable.appendChild(tr);
@@ -138,7 +198,7 @@ function renderChannelGrid() {
   els.aggregateNote.textContent = `평균 = 채널별 PSD 합계 / ${r.mean.included.length}개 유효 채널. 포함: ${r.mean.included.join(", ")}. 각 채널의 유효 구간을 독립 분석하므로 결측이 있으면 분석 시간이 다를 수 있습니다.`;
   for (const c of [...r.channels, r.mean, r.sum]) {
     const card = document.createElement("article"); card.className = "plot-card";
-    const title = document.createElement("h3"); title.textContent = c.channelName;
+    const title = document.createElement("h3"); title.textContent = selectedLabel(c);
     const info = document.createElement("p"); info.className = "plot-note";
     info.textContent = c.aggregate ? `포함 채널 ${c.included.length}개` : `${c.psd.segments}구간 · 사용 ${c.psd.usedSamples.toLocaleString()}샘플 · 제외 ${(r.rows - c.psd.usedSamples).toLocaleString()}샘플`;
     const canvas = document.createElement("canvas"); canvas.width = 900; canvas.height = 430;
@@ -174,6 +234,9 @@ function drawLinePlot(canvas, xs, ys, xLabel, yLabel, color, xMax = null, logY =
   }
   ctx.stroke();
 }
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[ch]));
+}
 function csvCell(value) { return `"${String(value ?? "").replace(/"/g, '""')}"`; }
 function download(rows, suffix) {
   const blob = new Blob(["\uFEFF", rows.map(row => row.map(csvCell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
@@ -183,13 +246,18 @@ function download(rows, suffix) {
 }
 function metadataRows() {
   const r = state.result;
-  return [["# file", state.file.name], ["# sample_rate_hz", r.fs], ["# rate_source", r.rateSource], ["# duration_samples_over_fs_s", r.duration], ["# input_rows", r.rows], ["# segment_samples", r.segmentLength], ["# window", "periodic Hann; segment mean removed"], ["# overlap", "50%; extra end-aligned window for remainder"], ["# low_cut_hz", r.lowCut], ["# high_cut_hz", r.highCut], ["# notch_50_60_hz", r.notch], ["# vref_V", r.vref], ["# unit", r.unit], ["# included_channels", r.mean.included.join(" ")], ...r.channels.map(c => [`# ${c.channelName}_gain`, c.gain])];
+  const ref = mainBandConfig();
+  return [["# file", state.file.name], ["# sample_rate_hz", r.fs], ["# rate_source", r.rateSource], ["# duration_samples_over_fs_s", r.duration], ["# input_rows", r.rows], ["# segment_samples", r.segmentLength], ["# window", "periodic Hann; segment mean removed"], ["# overlap", "50%; extra end-aligned window for remainder"], ["# low_cut_hz", r.lowCut], ["# high_cut_hz", r.highCut], ["# notch_50_60_hz", r.notch], ["# vref_V", r.vref], ["# unit", r.unit], ["# reference_band", ref.name], ["# reference_band_low_hz", ref.lo], ["# reference_band_high_hz", ref.hi], ["# included_channels", r.mean.included.join(" ")], ...r.channels.map(c => [`# ${c.channelName}_electrode`, state.electrodeLabels[c.channelName] || ""]), ...r.channels.map(c => [`# ${c.channelName}_gain`, c.gain])];
 }
 function exportSummary() {
   if (!state.result) return;
   const r = state.result;
-  const rows = [...metadataRows(), ["channel", "segments", "used_samples", "invalid_samples", "excluded_samples", "filtered_rms", "alpha_peak_hz", "band", "power", "relative"]];
-  for (const c of [...r.channels, r.mean, r.sum]) for (const b of c.powers) rows.push([c.channelName, c.psd.segments ?? "", c.psd.usedSamples, c.invalid ?? "", c.aggregate ? "" : r.rows - c.psd.usedSamples, Number.isFinite(c.rms) ? c.rms : "", Number.isFinite(c.alphaPeak.freq) ? c.alphaPeak.freq : "", b.name, c.aggregate || c.psd.segments ? b.power : "", c.aggregate || c.psd.segments ? b.relative : ""]);
+  const ref = mainBandConfig();
+  const rows = [...metadataRows(), ["channel", "electrode", "segments", "used_samples", "invalid_samples", "excluded_samples", "filtered_rms", "alpha_peak_hz", "reference_power", "band", "power", "relative", "ratio_to_reference"]];
+  for (const c of [...r.channels, r.mean, r.sum]) {
+    const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);
+    for (const b of c.powers) rows.push([c.channelName, c.aggregate ? "" : state.electrodeLabels[c.channelName] || "", c.psd.segments ?? "", c.psd.usedSamples, c.invalid ?? "", c.aggregate ? "" : r.rows - c.psd.usedSamples, Number.isFinite(c.rms) ? c.rms : "", Number.isFinite(c.alphaPeak.freq) ? c.alphaPeak.freq : "", Number.isFinite(refPower) ? refPower : "", b.name, c.aggregate || c.psd.segments ? b.power : "", c.aggregate || c.psd.segments ? b.relative : "", refPower > 0 ? b.power / refPower : ""]);
+  }
   download(rows, "eeg_summary");
 }
 function exportPsd() {

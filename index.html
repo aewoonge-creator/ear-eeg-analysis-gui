@@ -56,6 +56,24 @@
           </div>
         </label>
         <p class="help-text">필터의 0은 끄기입니다. 주파수는 샘플링 Hz의 절반 미만으로 설정하세요.</p>
+        <label>
+          기준 band
+          <select id="mainBandSelect">
+            <option value="Delta">Delta 1-4 Hz</option>
+            <option value="Theta">Theta 4-8 Hz</option>
+            <option value="Alpha" selected>Alpha 8-13 Hz</option>
+            <option value="Beta">Beta 13-30 Hz</option>
+            <option value="Gamma">Gamma 30-45 Hz</option>
+            <option value="Custom">직접 입력</option>
+          </select>
+        </label>
+        <label>
+          기준 band Hz
+          <div class="pair">
+            <input id="mainBandLow" type="number" min="0" step="0.1" value="8">
+            <input id="mainBandHigh" type="number" min="0.1" step="0.1" value="13">
+          </div>
+        </label>
         <label class="check-row">
           <input id="notchToggle" type="checkbox" checked>
           <span>50/60 Hz notch</span>
@@ -119,8 +137,8 @@
           <strong id="metricAlphaPeak">-</strong>
         </article>
         <article>
-          <span>Alpha Relative</span>
-          <strong id="metricAlphaRel">-</strong>
+          <span>Main Band</span>
+          <strong id="metricMainBand">-</strong>
         </article>
       </section>
 
@@ -142,13 +160,6 @@
         </article>
         <article class="plot-card compact">
           <header>
-            <h2>상대 Power</h2>
-            <span>Delta, Theta, Alpha, Beta, Gamma</span>
-          </header>
-          <canvas id="powerCanvas" width="900" height="430"></canvas>
-        </article>
-        <article class="plot-card compact">
-          <header>
             <h2>Band Table</h2>
             <span id="bandTableMeta">분석 전</span>
           </header>
@@ -160,6 +171,7 @@
                   <th>Hz</th>
                   <th>Power</th>
                   <th>Relative</th>
+                  <th>기준 대비</th>
                 </tr>
               </thead>
               <tbody id="bandTable"></tbody>
