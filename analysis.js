@@ -194,15 +194,96 @@
     const n = Math.min(requested, 2 ** Math.floor(Math.log2(info.rows)));
     const vref = Number(settings.vref), gain = Number(settings.gain);
     if (settings.convertUv && (!(vref > 0 && Number.isFinite(vref)) || !(gain > 0 && Number.isFinite(gain)))) throw new Error("Vref와 Gain은 양수여야 합니다.");
+    const artifactReject = settings.artifactReject !== false;
+    const railThresholdPercent = Number(settings.railThresholdPercent ?? 98);
+    const repeatMinimum = Number(settings.repeatMinimum ?? 3);
+    if (!(railThresholdPercent >= 50 && railThresholdPercent <= 100)) throw new Error("ADC rail 기준은 50~100% 사이여야 합니다.");
+    if (!(repeatMinimum >= 2 && repeatMinimum <= 100 && Number.isInteger(repeatMinimum))) throw new Error("동일 프레임 기준은 2~100개의 정수여야 합니다.");
+    const railThreshold = (2 ** 23 - 1) * railThresholdPercent / 100;
+    const minimumRailChannels = Math.min(2, info.channels.length);
+    const quality = {
+      artifactReject, railThresholdPercent, repeatMinimum,
+      repeatedSamples: 0, repeatedRuns: 0, railSamples: 0, detectedSamples: 0, excludedSamples: 0,
+      firstRepeatedRow: null, firstRailRow: null,
+      railByChannel: Object.fromEntries(info.channels.map(c => [c.name, 0])),
+    };
     const gains = {};
     for (const m of (info.meta.ads_channel_gains || "").matchAll(/(ch[1-8]):([\d.]+)/gi)) gains[m[1].toLowerCase()] = Number(m[2]);
     const previewLimit = Math.min(20000, Math.max(1, Math.ceil((Number(settings.previewSeconds) || 12) * fs)));
     const channels = info.channels.map(c => {
       const g = settings.metadataGain ? (gains[c.name.toLowerCase()] || Number(info.meta.ads_gain) || gain) : gain;
       if (settings.convertUv && !(g > 0 && Number.isFinite(g))) throw new Error("CSV Gain 설정을 확인해주세요.");
-      return { ...c, gain: g, factor: settings.convertUv ? vref / g / (2 ** 23 - 1) * 1e6 : 1, welch: makeWelch(n, fs), filter: makeFilter(fs, low, high, settings.notch), raw: [], filtered: [], fftInput: [], valid: 0, invalid: 0, sumSquares: 0 };
+      return { ...c, gain: g, factor: settings.convertUv ? vref / g / (2 ** 23 - 1) * 1e6 : 1, welch: makeWelch(n, fs), filter: makeFilter(fs, low, high, settings.notch), raw: [], filtered: [], fftInput: [], valid: 0, invalid: 0, artifact: 0, sumSquares: 0 };
     });
     let headerSeen = false, index = 0, previousTime = NaN, gaps = 0;
+    let repeatBuffer = [], repeatSignature = null;
+    function resetChannel(c) {
+      c.welch.gap(); c.filter.reset();
+      if (c.fftInput.length < n) c.fftInput = [];
+    }
+    function processFrame(frame, repeated) {
+      if (repeated) {
+        quality.repeatedSamples++;
+        if (quality.firstRepeatedRow === null) quality.firstRepeatedRow = frame.index + 1;
+      }
+      const railArtifact = frame.railChannels.length >= minimumRailChannels;
+      if (railArtifact) {
+        quality.railSamples++;
+        if (quality.firstRailRow === null) quality.firstRailRow = frame.index + 1;
+        for (const name of frame.railChannels) quality.railByChannel[name]++;
+      }
+      const rejected = artifactReject && (repeated || railArtifact);
+      if (repeated || railArtifact) quality.detectedSamples++;
+      if (rejected) quality.excludedSamples++;
+      for (let channelIndex = 0; channelIndex < channels.length; channelIndex++) {
+        const c = channels[channelIndex];
+        if (frame.timeGap) resetChannel(c);
+        if (rejected) {
+          c.artifact++; resetChannel(c);
+          if (frame.index < previewLimit) { c.raw.push(NaN); c.filtered.push(NaN); }
+          continue;
+        }
+        const count = frame.counts[channelIndex];
+        if (!Number.isFinite(count) || count === -8388608) {
+          c.invalid++; resetChannel(c);
+          if (frame.index < previewLimit) { c.raw.push(NaN); c.filtered.push(NaN); }
+          continue;
+        }
+        const raw = count * c.factor, filtered = c.filter.push(raw);
+        c.welch.push(filtered); c.valid++; c.sumSquares += filtered * filtered;
+        if (c.fftInput.length < n) c.fftInput.push(filtered);
+        if (frame.index < previewLimit) { c.raw.push(raw); c.filtered.push(filtered); }
+      }
+    }
+    function comparable(frame) {
+      return channels.length >= 2 && frame.counts.every(value => Number.isFinite(value) && value !== -8388608);
+    }
+    function sameFrame(frame, signature) {
+      return comparable(frame) && signature && frame.counts.every((value, i) => value === signature[i]);
+    }
+    function flushRepeatBuffer(repeated = false) {
+      for (const frame of repeatBuffer) processFrame(frame, repeated);
+      repeatBuffer = [];
+    }
+    function queueFrame(frame) {
+      if (repeatSignature) {
+        if (sameFrame(frame, repeatSignature)) { processFrame(frame, true); return; }
+        repeatSignature = null;
+      }
+      if (!comparable(frame)) { flushRepeatBuffer(); processFrame(frame, false); return; }
+      if (!repeatBuffer.length) { repeatBuffer.push(frame); return; }
+      if (sameFrame(frame, repeatBuffer[0].counts)) {
+        repeatBuffer.push(frame);
+        if (repeatBuffer.length === repeatMinimum) {
+          quality.repeatedRuns++;
+          repeatSignature = frame.counts.slice();
+          flushRepeatBuffer(true);
+        }
+      } else {
+        flushRepeatBuffer();
+        repeatBuffer.push(frame);
+      }
+    }
     for await (const line of lines(file, p => progress({ phase: "전체 기록 Welch PSD 계산", percent: 25 + p * 75 }))) {
       if (!line || line.startsWith("#")) continue;
       if (!headerSeen) { headerSeen = true; continue; }
@@ -211,21 +292,12 @@
       const timeGap = info.clock && (!Number.isFinite(time) || (Number.isFinite(previousTime) && (time <= previousTime || time - previousTime > 1.5 / fs)));
       if (timeGap) gaps++;
       previousTime = time;
-      for (const c of channels) {
-        if (timeGap) { c.welch.gap(); c.filter.reset(); if (c.fftInput.length < n) c.fftInput = []; }
-        const count = cells.length === info.headers.length ? number(cells[c.index]) : NaN;
-        if (!Number.isFinite(count) || count === -8388608) {
-          c.invalid++; c.welch.gap(); c.filter.reset(); if (c.fftInput.length < n) c.fftInput = [];
-          if (index < previewLimit) { c.raw.push(NaN); c.filtered.push(NaN); }
-          continue;
-        }
-        const raw = count * c.factor, filtered = c.filter.push(raw);
-        c.welch.push(filtered); c.valid++; c.sumSquares += filtered * filtered;
-        if (c.fftInput.length < n) c.fftInput.push(filtered);
-        if (index < previewLimit) { c.raw.push(raw); c.filtered.push(filtered); }
-      }
+      const counts = channels.map(c => cells.length === info.headers.length ? number(cells[c.index]) : NaN);
+      const railChannels = channels.filter((c, i) => Number.isFinite(counts[i]) && Math.abs(counts[i]) >= railThreshold).map(c => c.name);
+      queueFrame({ index, timeGap, counts, railChannels });
       index++;
     }
+    flushRepeatBuffer();
     const results = channels.map(c => {
       const psd = c.welch.finish();
       const fftResult = { freqs: [], amps: [] };
@@ -233,10 +305,10 @@
         const { re, im } = fft(c.fftInput.map((x, i) => x * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / n))));
         for (let k = 0; k <= n / 2; k++) { fftResult.freqs.push(k * fs / n); fftResult.amps.push((k === 0 || k === n / 2 ? 1 : 2) * Math.hypot(re[k], im[k]) / (n / 2)); }
       }
-      return decorate({ channelName: c.name, gain: c.gain, raw: c.raw, filtered: c.filtered, rms: c.valid ? Math.sqrt(c.sumSquares / c.valid) : NaN, valid: c.valid, invalid: c.invalid, psd, fft: fftResult });
+      return decorate({ channelName: c.name, gain: c.gain, raw: c.raw, filtered: c.filtered, rms: c.valid ? Math.sqrt(c.sumSquares / c.valid) : NaN, valid: c.valid, invalid: c.invalid, artifact: c.artifact, psd, fft: fftResult });
     });
     if (!results.some(c => c.psd.segments)) throw new Error(`연속된 유효 샘플 ${n}개가 없습니다. Welch 구간을 줄이거나 CSV의 결측값·시간 간격을 확인해주세요.`);
-    return { fs, rateSource: settings.autoRate ? (info.rateSource || "수동 기본값") : "수동", unit: settings.convertUv ? "uV" : "count", duration: info.rows / fs, rows: info.rows, lowCut: low, highCut: high, notch: settings.notch, vref, convertUv: settings.convertUv, segmentLength: n, frequencyResolution: fs / n, gaps, meta: info.meta, channels: results, mean: aggregate(results, "mean"), sum: aggregate(results, "sum") };
+    return { fs, rateSource: settings.autoRate ? (info.rateSource || "수동 기본값") : "수동", unit: settings.convertUv ? "uV" : "count", duration: info.rows / fs, rows: info.rows, lowCut: low, highCut: high, notch: settings.notch, vref, convertUv: settings.convertUv, segmentLength: n, frequencyResolution: fs / n, gaps, quality, meta: info.meta, channels: results, mean: aggregate(results, "mean"), sum: aggregate(results, "sum") };
   }
   const api = { analyzeFile, inspect, fft, makeWelch, bandPowers, aggregate, parseCsvLine };
   if (typeof module !== "undefined") module.exports = api;

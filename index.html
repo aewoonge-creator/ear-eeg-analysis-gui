@@ -79,6 +79,21 @@
           <span>50/60 Hz notch</span>
         </label>
         <label class="check-row">
+          <input id="artifactReject" type="checkbox" checked>
+          <span>반복/ADC rail 이상 샘플 자동 제외</span>
+        </label>
+        <div class="pair">
+          <label>
+            ADC rail 기준 %
+            <input id="railThresholdPercent" type="number" min="50" max="100" step="0.1" value="98">
+          </label>
+          <label>
+            동일 프레임 연속
+            <input id="repeatMinimum" type="number" min="2" max="100" step="1" value="3">
+          </label>
+        </div>
+        <p class="help-text">여러 채널의 ADC 포화와 모든 채널이 정확히 같은 값으로 반복되는 디지털 프레임을 감지합니다.</p>
+        <label class="check-row">
           <input id="convertUv" type="checkbox" checked>
           <span>ADS1299 count를 uV로 변환</span>
         </label>
@@ -141,6 +156,22 @@
           <span>Main Band</span>
           <strong id="metricMainBand">-</strong>
         </article>
+      </section>
+
+      <section id="qualityPanel" class="signal-quality" hidden aria-labelledby="qualityTitle">
+        <header>
+          <div>
+            <h2 id="qualityTitle">신호 품질 감지</h2>
+            <span id="qualityDetail">-</span>
+          </div>
+          <strong id="qualityStatus">-</strong>
+        </header>
+        <div class="quality-metrics">
+          <div><span>동일 프레임</span><strong id="qualityRepeated">-</strong></div>
+          <div><span>ADC Rail</span><strong id="qualityRail">-</strong></div>
+          <div><span>분석 제외</span><strong id="qualityExcluded">-</strong></div>
+          <div><span>처리 방식</span><strong id="qualityMode">-</strong></div>
+        </div>
       </section>
 
       <nav class="tabs" aria-label="plot tabs">

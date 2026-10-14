@@ -237,6 +237,70 @@ button:disabled {
   font-size: 21px;
 }
 
+.signal-quality {
+  background: #edf7f4;
+  border: 1px solid #b8ddd2;
+  border-left: 4px solid var(--good);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.signal-quality.warning {
+  background: #fff7ed;
+  border-color: #f0c89f;
+  border-left-color: var(--accent-2);
+}
+
+.signal-quality > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.signal-quality h2 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.signal-quality header span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#qualityStatus {
+  color: var(--good);
+  font-size: 16px;
+}
+
+.signal-quality.warning #qualityStatus {
+  color: var(--warn);
+}
+
+.quality-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.quality-metrics div {
+  display: grid;
+  gap: 4px;
+}
+
+.quality-metrics span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.quality-metrics strong {
+  font-size: 15px;
+}
+
 .tabs {
   display: flex;
   gap: 8px;
@@ -425,7 +489,8 @@ td:first-child {
   }
 
   .metrics,
-  .plot-grid {
+  .plot-grid,
+  .quality-metrics {
     grid-template-columns: 1fr;
   }
 

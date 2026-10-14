@@ -101,8 +101,13 @@ function analyze() {
       fillChannels(); render(); renderChannelGrid();
       els.exportBtn.disabled = els.exportPsdBtn.disabled = false;
       const r = state.result;
-      const exclusions = r.channels.reduce((s, c) => s + c.valid - c.psd.usedSamples + c.invalid, 0);
-      setStatus("전체 기록 분석 완료", `${state.file.name} · 선택 ${r.mean.included.length}/${r.channels.length}채널 · ${r.rows.toLocaleString()}행 · Hz 기준: ${r.rateSource} · 시간 끊김 ${r.gaps}회 · PSD 제외 ${exclusions.toLocaleString()} 채널·샘플`);
+      const exclusions = r.channels.reduce((s, c) => s + c.valid - c.psd.usedSamples + c.invalid + c.artifact, 0);
+      const qualityText = r.quality.detectedSamples
+        ? r.quality.artifactReject
+          ? ` · 품질 이상 ${r.quality.detectedSamples.toLocaleString()}행 감지·${r.quality.excludedSamples.toLocaleString()}행 제외`
+          : ` · 품질 이상 ${r.quality.detectedSamples.toLocaleString()}행 감지(제외 안 함)`
+        : " · 품질 이상 없음";
+      setStatus("전체 기록 분석 완료", `${state.file.name} · 선택 ${r.mean.included.length}/${r.channels.length}채널 · ${r.rows.toLocaleString()}행 · Hz 기준: ${r.rateSource} · 시간 끊김 ${r.gaps}회${qualityText} · PSD 미사용 ${exclusions.toLocaleString()} 채널·샘플`);
     }
   };
   worker.postMessage({ file: state.file, settings: {
@@ -110,6 +115,8 @@ function analyze() {
     lowCut: els.lowCut.value, highCut: els.highCut.value, notch: els.notchToggle.checked,
     convertUv: els.convertUv.checked, metadataGain: els.metadataGain.checked,
     vref: els.vref.value, gain: els.gain.value,
+    artifactReject: els.artifactReject.checked, railThresholdPercent: els.railThresholdPercent.value,
+    repeatMinimum: els.repeatMinimum.value,
     segmentLength: els.segmentLength.value, previewSeconds: els.timeWindow.value,
   } });
 }
@@ -134,7 +141,7 @@ function renderChannelControls() {
     const top = document.createElement("div"); top.className = "channel-pill-top";
     const label = document.createElement("div"); label.className = "channel-pill-main";
     const detail = c.psd
-      ? `${c.psd.segments}구간 · ${c.psd.usedSamples.toLocaleString()}/${state.result.rows.toLocaleString()}샘플 · Gain ${c.gain}`
+      ? `${c.psd.segments}구간 · ${c.psd.usedSamples.toLocaleString()}/${state.result.rows.toLocaleString()}샘플 · 품질 제외 ${c.artifact.toLocaleString()} · Gain ${c.gain}`
       : "분석 전";
     label.innerHTML = `<strong>${escapeHtml(c.channelName)}</strong><span>${detail}</span>`;
     const includeLabel = document.createElement("label"); includeLabel.className = "aggregate-check";
@@ -284,6 +291,7 @@ function bandPowerFromPsd(c, lo, hi) {
 function render() {
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === state.view));
   if (!state.result) {
+    els.qualityPanel.hidden = true;
     renderPlotChannelPicker();
     clearCanvas(els.mainCanvas, "CSV를 선택하면 전체 기록을 분석합니다.");
     for (const name of ["Duration", "Fs", "Rms", "AlphaPeak", "MainBand"]) els[`metric${name}`].textContent = "-";
@@ -293,6 +301,7 @@ function render() {
   ensureIndividualChannelForSignalView();
   renderPlotChannelPicker();
   const r = state.result, c = selected();
+  renderQuality();
   const ref = mainBandConfig();
   const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);
   els.metricDuration.textContent = `${formatNumber(r.duration, 2)} s`;
@@ -329,6 +338,24 @@ function render() {
     els.bandTable.appendChild(tr);
   }
 }
+function renderQuality() {
+  const r = state.result;
+  if (!r?.quality) { els.qualityPanel.hidden = true; return; }
+  const q = r.quality;
+  const hasWarning = q.repeatedSamples > 0 || q.railSamples > 0;
+  els.qualityPanel.hidden = false;
+  els.qualityPanel.classList.toggle("warning", hasWarning);
+  els.qualityStatus.textContent = hasWarning ? "주의" : "양호";
+  els.qualityRepeated.textContent = `${q.repeatedSamples.toLocaleString()}샘플 · ${q.repeatedRuns.toLocaleString()}구간`;
+  els.qualityRail.textContent = `${q.railSamples.toLocaleString()}샘플`;
+  els.qualityExcluded.textContent = `${q.excludedSamples.toLocaleString()}샘플 · ${formatNumber(q.excludedSamples / r.rows * 100, 2)}%`;
+  els.qualityMode.textContent = q.artifactReject ? "자동 제외" : "감지만";
+  const railChannels = Object.entries(q.railByChannel).filter(([, count]) => count > 0).map(([name, count]) => `${channelDisplayName(name)} ${count}회`);
+  const firsts = [q.firstRepeatedRow && `반복 첫 행 ${q.firstRepeatedRow.toLocaleString()}`, q.firstRailRow && `rail 첫 행 ${q.firstRailRow.toLocaleString()}`].filter(Boolean);
+  els.qualityDetail.textContent = hasWarning
+    ? [`동일 프레임 ${q.repeatMinimum}개 이상 · ADC ${q.railThresholdPercent}% 이상 2개 채널`, ...firsts, railChannels.length ? `rail 채널: ${railChannels.join(", ")}` : ""].filter(Boolean).join(" · ")
+    : `동일 프레임 ${q.repeatMinimum}개 이상 및 ADC ${q.railThresholdPercent}% 이상 다채널 포화가 감지되지 않았습니다.`;
+}
 function renderChannelGrid() {
   const r = state.result;
   els.channelPsdGrid.replaceChildren();
@@ -338,7 +365,7 @@ function renderChannelGrid() {
     const card = document.createElement("article"); card.className = "plot-card";
     const title = document.createElement("h3"); title.textContent = selectedLabel(c);
     const info = document.createElement("p"); info.className = "plot-note";
-    info.textContent = c.aggregate ? `포함 채널 ${c.included.length}개` : `평균 포함 · ${c.psd.segments}구간 · 사용 ${c.psd.usedSamples.toLocaleString()}샘플 · 제외 ${(r.rows - c.psd.usedSamples).toLocaleString()}샘플`;
+    info.textContent = c.aggregate ? `포함 채널 ${c.included.length}개` : `평균 포함 · ${c.psd.segments}구간 · 사용 ${c.psd.usedSamples.toLocaleString()}샘플 · 품질 제외 ${c.artifact.toLocaleString()}샘플 · 전체 제외 ${(r.rows - c.psd.usedSamples).toLocaleString()}샘플`;
     const canvas = document.createElement("canvas"); canvas.width = 900; canvas.height = 430;
     canvas.setAttribute("aria-label", `${c.channelName} Welch PSD`);
     card.append(title, info, canvas); els.channelPsdGrid.appendChild(card);
@@ -387,17 +414,17 @@ function download(rows, suffix) {
 function metadataRows() {
   const r = state.result;
   const ref = mainBandConfig();
-  return [["# file", state.file.name], ["# sample_rate_hz", r.fs], ["# rate_source", r.rateSource], ["# duration_samples_over_fs_s", r.duration], ["# input_rows", r.rows], ["# segment_samples", r.segmentLength], ["# window", "periodic Hann; segment mean removed"], ["# overlap", "50%; extra end-aligned window for remainder"], ["# low_cut_hz", r.lowCut], ["# high_cut_hz", r.highCut], ["# notch_50_60_hz", r.notch], ["# vref_V", r.vref], ["# unit", r.unit], ["# reference_band", ref.name], ["# reference_band_low_hz", ref.lo], ["# reference_band_high_hz", ref.hi], ["# included_channels", r.mean.included.join(" ")], ...r.channels.map(c => [`# ${c.channelName}_electrode`, state.electrodeLabels[c.channelName] || ""]), ...r.channels.map(c => [`# ${c.channelName}_gain`, c.gain])];
+  return [["# file", state.file.name], ["# sample_rate_hz", r.fs], ["# rate_source", r.rateSource], ["# duration_samples_over_fs_s", r.duration], ["# input_rows", r.rows], ["# segment_samples", r.segmentLength], ["# window", "periodic Hann; segment mean removed"], ["# overlap", "50%; extra end-aligned window for remainder"], ["# low_cut_hz", r.lowCut], ["# high_cut_hz", r.highCut], ["# notch_50_60_hz", r.notch], ["# artifact_rejection", r.quality.artifactReject], ["# repeated_frame_minimum", r.quality.repeatMinimum], ["# repeated_frame_samples", r.quality.repeatedSamples], ["# adc_rail_threshold_percent", r.quality.railThresholdPercent], ["# adc_rail_samples", r.quality.railSamples], ["# quality_detected_samples", r.quality.detectedSamples], ["# quality_excluded_samples", r.quality.excludedSamples], ["# vref_V", r.vref], ["# unit", r.unit], ["# reference_band", ref.name], ["# reference_band_low_hz", ref.lo], ["# reference_band_high_hz", ref.hi], ["# included_channels", r.mean.included.join(" ")], ...r.channels.map(c => [`# ${c.channelName}_electrode`, state.electrodeLabels[c.channelName] || ""]), ...r.channels.map(c => [`# ${c.channelName}_gain`, c.gain])];
 }
 function exportSummary() {
   if (!state.result) return;
   const r = state.result;
   const ref = mainBandConfig();
-  const rows = [...metadataRows(), ["channel", "electrode", "segments", "used_samples", "invalid_samples", "excluded_samples", "filtered_rms", "alpha_peak_hz", "reference_power", "band", "power", "relative", "ratio_to_reference"]];
+  const rows = [...metadataRows(), ["channel", "electrode", "segments", "used_samples", "invalid_samples", "artifact_samples", "excluded_samples", "filtered_rms", "alpha_peak_hz", "reference_power", "band", "power", "relative", "ratio_to_reference"]];
   const selectedChannels = r.channels.filter(c => state.includedChannels.has(c.channelName));
   for (const c of [...selectedChannels, r.mean, r.sum]) {
     const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);
-    for (const b of c.powers) rows.push([c.channelName, c.aggregate ? "" : state.electrodeLabels[c.channelName] || "", c.psd.segments ?? "", c.psd.usedSamples, c.invalid ?? "", c.aggregate ? "" : r.rows - c.psd.usedSamples, Number.isFinite(c.rms) ? c.rms : "", Number.isFinite(c.alphaPeak.freq) ? c.alphaPeak.freq : "", Number.isFinite(refPower) ? refPower : "", b.name, c.aggregate || c.psd.segments ? b.power : "", c.aggregate || c.psd.segments ? b.relative : "", refPower > 0 ? b.power / refPower : ""]);
+    for (const b of c.powers) rows.push([c.channelName, c.aggregate ? "" : state.electrodeLabels[c.channelName] || "", c.psd.segments ?? "", c.psd.usedSamples, c.invalid ?? "", c.artifact ?? "", c.aggregate ? "" : r.rows - c.psd.usedSamples, Number.isFinite(c.rms) ? c.rms : "", Number.isFinite(c.alphaPeak.freq) ? c.alphaPeak.freq : "", Number.isFinite(refPower) ? refPower : "", b.name, c.aggregate || c.psd.segments ? b.power : "", c.aggregate || c.psd.segments ? b.relative : "", refPower > 0 ? b.power / refPower : ""]);
   }
   download(rows, "eeg_summary");
 }

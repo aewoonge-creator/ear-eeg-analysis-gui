@@ -83,9 +83,42 @@ test('band integration clips boundaries instead of double-counting adjacent bins
   assert.deepEqual(powers.map(b=>b.power),[3,4,5,17,15]);
   close(powers.reduce((s,b)=>s+b.relative,0),1);
 });
+test('repeated multichannel frames and concurrent ADC rail samples are detected and excluded', async () => {
+  const count=128, max=2**23-1;
+  const rows=['# fs=256','t_us,'+Array.from({length:8},(_,c)=>`ch${c+1}`).join(',')];
+  const frozen=Array.from({length:8},(_,c)=>(c+1)*Math.sin(2*Math.PI*10*19/256));
+  for(let i=0;i<count;i++) {
+    let values=Array.from({length:8},(_,c)=>(c+1)*Math.sin(2*Math.PI*10*i/256));
+    if(i>=19&&i<=23) values=frozen;
+    if(i===70||i===71) { values[0]=max*0.99; values[1]=-max*0.99; }
+    if(i===90) values=values.map(()=>7000000);
+    rows.push(`${i/256*1e6},${values.join(',')}`);
+  }
+  const csv=file(rows.join('\n'));
+  const r=await analyzeFile(csv,{...settings,segmentLength:16,artifactReject:true,railThresholdPercent:98,repeatMinimum:3});
+  assert.equal(r.quality.repeatedRuns,1);
+  assert.equal(r.quality.repeatedSamples,5);
+  assert.equal(r.quality.railSamples,2);
+  assert.equal(r.quality.detectedSamples,7);
+  assert.equal(r.quality.excludedSamples,7);
+  assert.equal(r.quality.railByChannel.ch1,2);
+  assert.equal(r.quality.railByChannel.ch2,2);
+  assert.equal(r.channels[0].artifact,7);
+  assert.equal(r.channels[0].valid,count-7);
+  for(const i of [19,20,21,22,23,70,71]) assert.ok(Number.isNaN(r.channels[0].raw[i]));
+
+  const detectedOnly=await analyzeFile(csv,{...settings,segmentLength:16,artifactReject:false,railThresholdPercent:98,repeatMinimum:3});
+  assert.equal(detectedOnly.quality.repeatedSamples,5);
+  assert.equal(detectedOnly.quality.railSamples,2);
+  assert.equal(detectedOnly.quality.excludedSamples,0);
+  assert.equal(detectedOnly.channels[0].artifact,0);
+  assert.equal(detectedOnly.channels[0].valid,count);
+});
 test('validation reports invalid filters, settings and files with no usable windows', async () => {
   await assert.rejects(analyzeFile(signalCsv(512),{...settings,highCut:128}),/Nyquist/);
   await assert.rejects(analyzeFile(signalCsv(512),{...settings,convertUv:true,gain:0}),/Gain/);
   await assert.rejects(analyzeFile(signalCsv(512),{...settings,segmentLength:100}),/2의 거듭제곱/);
+  await assert.rejects(analyzeFile(signalCsv(512),{...settings,railThresholdPercent:101}),/ADC rail/);
+  await assert.rejects(analyzeFile(signalCsv(512),{...settings,repeatMinimum:1}),/동일 프레임/);
   await assert.rejects(analyzeFile(file('t_us,ch1\n'+Array.from({length:16},(_,i)=>`${i*4000},`).join('\n')),settings),/연속된 유효/);
 });
