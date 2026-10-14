@@ -340,7 +340,7 @@ function render() {
 }
 function renderQuality() {
   const r = state.result;
-  if (!r?.quality) { els.qualityPanel.hidden = true; return; }
+  if (!r?.quality) { els.qualityPanel.hidden = true; els.qualityChannelBreakdown.hidden = true; return; }
   const q = r.quality;
   const hasWarning = q.repeatedSamples > 0 || q.railSamples > 0;
   els.qualityPanel.hidden = false;
@@ -355,6 +355,30 @@ function renderQuality() {
   els.qualityDetail.textContent = hasWarning
     ? [`동일 프레임 ${q.repeatMinimum}개 이상 · ADC ${q.railThresholdPercent}% 이상 2개 채널`, ...firsts, railChannels.length ? `rail 채널: ${railChannels.join(", ")}` : ""].filter(Boolean).join(" · ")
     : `동일 프레임 ${q.repeatMinimum}개 이상 및 ADC ${q.railThresholdPercent}% 이상 다채널 포화가 감지되지 않았습니다.`;
+  els.qualityChannelList.replaceChildren();
+  const excludedChannels = r.channels.filter(c => c.artifact > 0);
+  els.qualityChannelBreakdown.hidden = !hasWarning;
+  if (!hasWarning) return;
+  if (!q.artifactReject) {
+    els.qualityChannelSummary.textContent = "감지만 사용 중이므로 제외된 채널은 없습니다.";
+    return;
+  }
+  els.qualityChannelSummary.textContent = `해당 ${q.excludedSamples.toLocaleString()}개 행을 ${excludedChannels.length}개 채널에서 함께 제외해 시간축을 유지합니다.`;
+  for (const c of excludedChannels) {
+    const railCount = q.railByChannel[c.channelName] || 0;
+    const item = document.createElement("div");
+    item.className = `quality-channel-item${railCount ? " rail-cause" : ""}`;
+    const name = document.createElement("strong"); name.textContent = channelDisplayName(c.channelName);
+    const count = document.createElement("span"); count.textContent = `${c.artifact.toLocaleString()}샘플 제외`;
+    const reason = document.createElement("em");
+    const reasons = [];
+    if (q.repeatedSamples) reasons.push("반복 프레임");
+    if (railCount) reasons.push(`rail 원인 ${railCount.toLocaleString()}회`);
+    else if (q.railSamples) reasons.push("동시 행 제외");
+    reason.textContent = reasons.join(" · ");
+    item.append(name, count, reason);
+    els.qualityChannelList.appendChild(item);
+  }
 }
 function renderChannelGrid() {
   const r = state.result;
