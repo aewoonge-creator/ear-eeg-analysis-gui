@@ -1,12 +1,12 @@
 "use strict";
-const state = { file: null, result: null, worker: null, view: "psd", electrodeLabels: {} };
+const state = { file: null, result: null, worker: null, view: "psd", electrodeLabels: {}, includedChannels: new Set() };
 const els = Object.fromEntries(Array.from(document.querySelectorAll("[id]"), el => [el.id, el]));
 const BANDS = [
-  { name: "Delta", lo: 1, hi: 4 },
-  { name: "Theta", lo: 4, hi: 8 },
-  { name: "Alpha", lo: 8, hi: 13 },
-  { name: "Beta", lo: 13, hi: 30 },
-  { name: "Gamma", lo: 30, hi: 45 },
+  { name: "Delta", lo: 1, hi: 4, color: "#0f8b8d" },
+  { name: "Theta", lo: 4, hi: 8, color: "#e85d04" },
+  { name: "Alpha", lo: 8, hi: 13, color: "#1b998b" },
+  { name: "Beta", lo: 13, hi: 30, color: "#3454d1" },
+  { name: "Gamma", lo: 30, hi: 45, color: "#7b2cbf" },
 ];
 els.csvFile.addEventListener("change", () => {
   if (!els.csvFile.files[0]) return;
@@ -71,6 +71,8 @@ function analyze() {
     else if (data.result) {
       state.result = data.result; worker.terminate(); state.worker = null; setBusy(false);
       els.sampleRate.value = Number(data.result.fs.toPrecision(10));
+      state.includedChannels = new Set(data.result.channels.filter(c => c.psd.segments > 0).map(c => c.channelName));
+      recomputeAggregates();
       fillChannels(); render(); renderChannelGrid();
       els.exportBtn.disabled = els.exportPsdBtn.disabled = false;
       const r = state.result;
@@ -89,15 +91,34 @@ function analyze() {
 function fillChannels() {
   els.channelSelect.replaceChildren(); els.channelList.replaceChildren();
   const r = state.result;
-  for (const [value, name] of [["mean", "전체 채널 PSD 평균"], ["sum", "전체 채널 PSD 합계"], ...r.channels.map((c, i) => [String(i), channelDisplayName(c.channelName)])]) {
+  for (const [value, name] of [["mean", r.mean.channelName], ["sum", r.sum.channelName], ...r.channels.map((c, i) => [String(i), channelDisplayName(c.channelName)])]) {
     const option = document.createElement("option"); option.value = value; option.textContent = name;
     if (/^\d+$/.test(value) && !r.channels[Number(value)].psd.segments) option.disabled = true;
     els.channelSelect.appendChild(option);
   }
   for (const c of r.channels) {
     const pill = document.createElement("div"); pill.className = "channel-pill";
+    const top = document.createElement("div"); top.className = "channel-pill-top";
     const label = document.createElement("div"); label.className = "channel-pill-main";
     label.innerHTML = `<strong>${escapeHtml(c.channelName)}</strong><span>${c.psd.segments}구간 · ${c.psd.usedSamples.toLocaleString()}/${r.rows.toLocaleString()}샘플 · Gain ${c.gain}</span>`;
+    const includeLabel = document.createElement("label"); includeLabel.className = "aggregate-check";
+    const include = document.createElement("input"); include.type = "checkbox"; include.checked = state.includedChannels.has(c.channelName);
+    include.disabled = !c.psd.segments;
+    const includeText = document.createElement("span"); includeText.textContent = "평균 포함";
+    include.addEventListener("change", () => {
+      if (include.checked) state.includedChannels.add(c.channelName);
+      else state.includedChannels.delete(c.channelName);
+      if (!state.includedChannels.size) {
+        state.includedChannels.add(c.channelName); include.checked = true;
+        setStatus("채널 선택 필요", "선택 평균에는 유효한 채널이 최소 1개 필요합니다.");
+        return;
+      }
+      recomputeAggregates();
+      refreshAggregateLabels();
+      render(); renderChannelGrid();
+    });
+    includeLabel.append(include, includeText);
+    top.append(label, includeLabel);
     const input = document.createElement("input");
     input.className = "electrode-input";
     input.type = "text";
@@ -109,9 +130,10 @@ function fillChannels() {
       render();
       renderChannelGrid();
     });
-    pill.append(label, input);
+    pill.append(top, input);
     els.channelList.appendChild(pill);
   }
+  refreshAggregateLabels();
 }
 function selected() {
   const r = state.result;
@@ -127,6 +149,52 @@ function refreshChannelLabels() {
     if (/^\d+$/.test(option.value)) option.textContent = channelDisplayName(state.result.channels[Number(option.value)].channelName);
   }
 }
+function refreshAggregateLabels() {
+  if (!state.result) return;
+  const count = state.result.mean.included.length;
+  els.channelSelectionSummary.textContent = `평균 포함 채널 ${count}/${state.result.channels.length}개 · 체크 해제한 채널은 선택 평균과 합계에서 제외됩니다.`;
+  for (const option of els.channelSelect.options) {
+    if (option.value === "mean") option.textContent = state.result.mean.channelName;
+    if (option.value === "sum") option.textContent = state.result.sum.channelName;
+  }
+}
+function integratePsd(c, lo, hi) {
+  if (!c?.psd?.freqs?.length || !c?.psd?.values?.length) return NaN;
+  const { freqs, values } = c.psd;
+  let area = 0;
+  for (let i = 1; i < freqs.length; i++) {
+    const f0 = freqs[i - 1], f1 = freqs[i];
+    const a = Math.max(lo, f0), b = Math.min(hi, f1);
+    if (b <= a) continue;
+    const slope = (values[i] - values[i - 1]) / (f1 - f0);
+    area += (2 * values[i - 1] + slope * (a + b - 2 * f0)) * (b - a) / 2;
+  }
+  return area;
+}
+function decorateAggregate(result) {
+  const total = integratePsd(result, 1, 45);
+  result.powers = BANDS.map(b => {
+    const power = integratePsd(result, b.lo, b.hi);
+    return { ...b, power, relative: total > 0 ? power / total : 0 };
+  });
+  result.alphaPeak = { freq: NaN, value: 0 };
+  result.psd.freqs.forEach((freq, i) => {
+    if (freq >= 8 && freq <= 13 && result.psd.values[i] > result.alphaPeak.value) result.alphaPeak = { freq, value: result.psd.values[i] };
+  });
+  return result;
+}
+function recomputeAggregates() {
+  if (!state.result) return;
+  const included = state.result.channels.filter(c => c.psd.segments > 0 && state.includedChannels.has(c.channelName));
+  if (!included.length) return;
+  const createAggregate = mode => {
+    const values = included[0].psd.values.map((_, i) => included.reduce((sum, c) => sum + c.psd.values[i], 0) / (mode === "mean" ? included.length : 1));
+    const label = mode === "mean" ? "선택 채널 PSD 평균" : "선택 채널 PSD 합계";
+    return decorateAggregate({ channelName: `${label} (${included.length}개)`, aggregate: true, included: included.map(c => c.channelName), psd: { ...included[0].psd, values, segments: null, usedSamples: null }, rms: NaN });
+  };
+  state.result.mean = createAggregate("mean");
+  state.result.sum = createAggregate("sum");
+}
 function selectedLabel(c = selected()) {
   return c.aggregate ? c.channelName : channelDisplayName(c.channelName);
 }
@@ -138,14 +206,7 @@ function mainBandConfig() {
   return { name: selectedBand ? selectedBand.name : "Custom", lo: Math.min(safeLo, safeHi), hi: Math.max(safeLo, safeHi) };
 }
 function bandPowerFromPsd(c, lo, hi) {
-  if (!c?.psd?.freqs?.length || !c?.psd?.values?.length) return NaN;
-  let area = 0;
-  for (let i = 1; i < c.psd.freqs.length; i++) {
-    const f0 = c.psd.freqs[i - 1], f1 = c.psd.freqs[i];
-    if (f1 < lo || f0 > hi) continue;
-    area += ((c.psd.values[i - 1] + c.psd.values[i]) / 2) * (f1 - f0);
-  }
-  return area;
+  return integratePsd(c, lo, hi);
 }
 function render() {
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === state.view));
@@ -195,12 +256,12 @@ function render() {
 function renderChannelGrid() {
   const r = state.result;
   els.channelPsdGrid.replaceChildren();
-  els.aggregateNote.textContent = `평균 = 채널별 PSD 합계 / ${r.mean.included.length}개 유효 채널. 포함: ${r.mean.included.join(", ")}. 각 채널의 유효 구간을 독립 분석하므로 결측이 있으면 분석 시간이 다를 수 있습니다.`;
+  els.aggregateNote.textContent = `선택 평균 = 채널별 PSD 합계 / ${r.mean.included.length}개 선택 채널. 포함: ${r.mean.included.map(channelDisplayName).join(", ")}. 체크 해제한 채널은 평균·합계에서 제외됩니다.`;
   for (const c of [...r.channels, r.mean, r.sum]) {
     const card = document.createElement("article"); card.className = "plot-card";
     const title = document.createElement("h3"); title.textContent = selectedLabel(c);
     const info = document.createElement("p"); info.className = "plot-note";
-    info.textContent = c.aggregate ? `포함 채널 ${c.included.length}개` : `${c.psd.segments}구간 · 사용 ${c.psd.usedSamples.toLocaleString()}샘플 · 제외 ${(r.rows - c.psd.usedSamples).toLocaleString()}샘플`;
+    info.textContent = c.aggregate ? `포함 채널 ${c.included.length}개` : `${state.includedChannels.has(c.channelName) ? "평균 포함" : "평균 제외"} · ${c.psd.segments}구간 · 사용 ${c.psd.usedSamples.toLocaleString()}샘플 · 제외 ${(r.rows - c.psd.usedSamples).toLocaleString()}샘플`;
     const canvas = document.createElement("canvas"); canvas.width = 900; canvas.height = 430;
     canvas.setAttribute("aria-label", `${c.channelName} Welch PSD`);
     card.append(title, info, canvas); els.channelPsdGrid.appendChild(card);
@@ -210,7 +271,8 @@ function renderChannelGrid() {
 }
 function drawLinePlot(canvas, xs, ys, xLabel, yLabel, color, xMax = null, logY = false) {
   const ctx = canvas.getContext("2d"), width = canvas.width, height = canvas.height;
-  const pad = { l: 92, r: 26, t: 28, b: 58 };
+  const frequencyAxis = xLabel === "Frequency (Hz)";
+  const pad = { l: 92, r: 26, t: 28, b: frequencyAxis ? 112 : 58 };
   let xMin = Infinity, xHi = -Infinity, yMin = Infinity, yMax = -Infinity, count = 0;
   for (let i = 0; i < xs.length; i++) {
     if (!Number.isFinite(ys[i]) || (logY && ys[i] < 0) || (xMax !== null && xs[i] > xMax)) continue;
@@ -222,6 +284,7 @@ function drawLinePlot(canvas, xs, ys, xLabel, yLabel, color, xMax = null, logY =
   if (yMin === yMax) { yMin--; yMax++; }
   const margin = (yMax - yMin) * 0.08; yMin -= margin; yMax += margin;
   drawAxes(ctx, width, height, pad, xLabel, logY ? `log10 ${yLabel}` : yLabel, xMin, xHi, yMin, yMax);
+  if (frequencyAxis) drawFrequencyBandGuide(ctx, width, height, pad, xMin, xHi);
   ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
   let connected = false;
   for (let i = 0; i < xs.length; i++) {
@@ -274,7 +337,7 @@ function drawAxes(ctx, width, height, pad, xLabel, yLabel, xMin, xMax, yMin, yMa
   ctx.fillStyle = "#627082";
   ctx.font = "22px Segoe UI";
   ctx.textAlign = "center";
-  ctx.fillText(xLabel, width / 2, height - 15);
+  ctx.fillText(xLabel, width / 2, height - (pad.b > 80 ? 56 : 15));
   ctx.save();
   ctx.translate(20, height / 2);
   ctx.rotate(-Math.PI / 2);
@@ -306,6 +369,25 @@ function drawAxes(ctx, width, height, pad, xLabel, yLabel, xMin, xMax, yMin, yMa
   }
   ctx.strokeStyle = "#9aa6b2";
   ctx.strokeRect(pad.l, pad.t, width - pad.l - pad.r, height - pad.t - pad.b);
+}
+
+function drawFrequencyBandGuide(ctx, width, height, pad, xMin, xMax) {
+  const plotBottom = height - pad.b;
+  for (const band of BANDS) {
+    const lo = Math.max(band.lo, xMin), hi = Math.min(band.hi, xMax);
+    if (hi <= lo) continue;
+    const x0 = scale(lo, xMin, xMax, pad.l, width - pad.r);
+    const x1 = scale(hi, xMin, xMax, pad.l, width - pad.r);
+    ctx.save(); ctx.globalAlpha = 0.055; ctx.fillStyle = band.color;
+    ctx.fillRect(x0, pad.t, x1 - x0, plotBottom - pad.t); ctx.restore();
+  }
+  const legendWidth = (width - pad.l - pad.r) / BANDS.length;
+  ctx.font = "17px Segoe UI"; ctx.textAlign = "center";
+  BANDS.forEach((band, i) => {
+    const x = pad.l + legendWidth * (i + 0.5);
+    ctx.fillStyle = band.color; ctx.fillRect(x - 21, height - 43, 42, 5);
+    ctx.fillStyle = "#4b5968"; ctx.fillText(`${band.name} ${band.lo}-${band.hi} Hz`, x, height - 17);
+  });
 }
 
 function drawBars(canvas, bands, relative) {

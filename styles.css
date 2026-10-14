@@ -342,9 +342,31 @@ td:first-child {
 }
 
 .channel-pill-main {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
   gap: 8px;
+}
+
+.channel-pill-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.aggregate-check {
+  display: inline-flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 5px !important;
+  white-space: nowrap;
+  color: rgba(247, 250, 252, 0.86) !important;
+  cursor: pointer;
+}
+
+.aggregate-check input {
+  width: 16px;
+  min-height: 16px;
+  accent-color: #6ee7d8;
 }
 
 .channel-pill strong {
