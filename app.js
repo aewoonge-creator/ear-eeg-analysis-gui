@@ -1,5 +1,5 @@
 "use strict";
-const state = { file: null, result: null, worker: null, view: "psd", electrodeLabels: {}, includedChannels: new Set(), availableChannels: [] };
+const state = { file: null, result: null, worker: null, view: "psd", bandMetric: "meanPsd", electrodeLabels: {}, includedChannels: new Set(), availableChannels: [] };
 const els = Object.fromEntries(Array.from(document.querySelectorAll("[id]"), el => [el.id, el]));
 const BANDS = [
   { name: "Delta", lo: 1, hi: 4, color: "#0f8b8d" },
@@ -27,6 +27,9 @@ for (const input of [els.mainBandLow, els.mainBandHigh]) {
 }
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => { state.view = tab.dataset.view; render(); });
+}
+for (const button of document.querySelectorAll(".band-metric-button")) {
+  button.addEventListener("click", () => { state.bandMetric = button.dataset.bandMetric; render(); });
 }
 for (const input of document.querySelectorAll(".panel input, .panel select")) {
   if (["channelSelect", "mainBandSelect", "mainBandLow", "mainBandHigh"].includes(input.id)) continue;
@@ -288,13 +291,36 @@ function mainBandConfig() {
 function bandPowerFromPsd(c, lo, hi) {
   return integratePsd(c, lo, hi);
 }
+function dominantPeak(c, lo = 1, hi = 45) {
+  let peak = { freq: NaN, value: -Infinity, band: "-" };
+  c.psd.freqs.forEach((freq, index) => {
+    const value = c.psd.values[index];
+    if (freq >= lo && freq <= hi && Number.isFinite(value) && value > peak.value) peak = { freq, value, band: BANDS.find(b => freq >= b.lo && freq <= b.hi)?.name || "-" };
+  });
+  return peak;
+}
+function bandChartConfig(refPower, unit) {
+  const configs = {
+    meanPsd: { title: "평균 PSD/Hz · 대역폭 보정", unit: `${unit}²/Hz`, value: b => b.power / (b.hi - b.lo), format: value => formatNumber(value, 3) },
+    absolute: { title: "절대 Band Power · PSD 적분", unit: `${unit}²`, value: b => b.power, format: value => formatNumber(value, 3) },
+    relative: { title: "Relative Band Power · 1-45 Hz 구성비", unit: "%", value: b => b.relative * 100, format: value => `${formatNumber(value, 1)}%` },
+    ratio: { title: `기준 대비 · ${mainBandConfig().name}`, unit: "x", value: b => refPower > 0 ? b.power / refPower : NaN, format: value => `${formatNumber(value, 3)}x` },
+  };
+  return configs[state.bandMetric] || configs.meanPsd;
+}
 function render() {
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === state.view));
+  document.querySelectorAll(".band-metric-button").forEach(button => {
+    const active = button.dataset.bandMetric === state.bandMetric;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  els.bandMetricPicker.hidden = state.view !== "power" || !state.result;
   if (!state.result) {
     els.qualityPanel.hidden = true;
     renderPlotChannelPicker();
     clearCanvas(els.mainCanvas, "CSV를 선택하면 전체 기록을 분석합니다.");
-    for (const name of ["Duration", "Fs", "Rms", "AlphaPeak", "MainBand"]) els[`metric${name}`].textContent = "-";
+    for (const name of ["Duration", "Fs", "Rms", "AlphaPeak", "DominantPeak", "MainBand"]) els[`metric${name}`].textContent = "-";
     els.mainPlotMeta.textContent = "-"; els.bandTableMeta.textContent = "분석 전"; els.bandTable.replaceChildren();
     return;
   }
@@ -304,18 +330,22 @@ function render() {
   renderQuality();
   const ref = mainBandConfig();
   const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);
+  const peak = dominantPeak(c);
   els.metricDuration.textContent = `${formatNumber(r.duration, 2)} s`;
   els.metricFs.textContent = `${formatNumber(r.fs, 3)} Hz`;
   els.metricRms.textContent = c.aggregate ? "채널 선택 시 표시" : `${formatNumber(c.rms, 2)} ${r.unit}`;
   els.metricAlphaPeak.textContent = `${formatNumber(c.alphaPeak.freq, 2)} Hz`;
+  els.metricDominantPeak.textContent = Number.isFinite(peak.freq) ? `${formatNumber(peak.freq, 2)} Hz · ${peak.band}` : "-";
   els.metricMainBand.textContent = `${formatNumber(refPower, 3)} ${r.unit}²`;
   const maxHz = Math.min(45, r.fs / 2);
   els.mainPlotMeta.textContent = `${selectedLabel(c)} · ${r.segmentLength} samples/window · Δf ${formatNumber(r.frequencyResolution, 3)} Hz`;
   if (state.view === "psd") {
     els.mainPlotTitle.textContent = "Welch PSD · 전체 기록";
-    drawLinePlot(els.mainCanvas, c.psd.freqs, c.psd.values, "Frequency (Hz)", `${r.unit}²/Hz`, "#1b998b", maxHz, true);
+    drawLinePlot(els.mainCanvas, c.psd.freqs, c.psd.values, "Frequency (Hz)", `${r.unit}²/Hz`, "#1b998b", maxHz, true, [{ x: peak.freq, label: `Peak ${formatNumber(peak.freq, 2)} Hz` }]);
   } else if (state.view === "power") {
-    els.mainPlotTitle.textContent = "Relative Band Power"; drawBars(els.mainCanvas, c.powers, true);
+    const chart = bandChartConfig(refPower, r.unit);
+    els.mainPlotTitle.textContent = chart.title;
+    drawBars(els.mainCanvas, c.powers, chart);
   } else if (c.aggregate) {
     els.mainPlotTitle.textContent = "채널별 신호";
     clearCanvas(els.mainCanvas, "Raw / Filtered / FFT는 개별 채널을 선택해주세요.");
@@ -327,12 +357,13 @@ function render() {
     els.mainPlotTitle.textContent = `${state.view === "raw" ? "Raw" : "Filtered"} · 처음 ${formatNumber(values.length / r.fs, 2)}초 미리보기`;
     drawLinePlot(els.mainCanvas, values.map((_, i) => i / r.fs), values, "Time (s)", r.unit, "#0f8b8d");
   }
-  els.bandTableMeta.textContent = `${selectedLabel(c)} · 기준 ${ref.name} ${ref.lo}-${ref.hi} Hz · ${r.unit}²`;
+  els.bandTableMeta.textContent = `${selectedLabel(c)} · 기준 ${ref.name} ${ref.lo}-${ref.hi} Hz · Power ${r.unit}²`;
   els.bandTable.replaceChildren();
   for (const b of c.powers) {
     const tr = document.createElement("tr");
     const ratio = refPower > 0 ? b.power / refPower : NaN;
-    for (const value of [b.name, `${b.lo}-${b.hi}`, formatNumber(b.power, 4), `${formatNumber(b.relative * 100, 2)}%`, `${formatNumber(ratio, 3)}x`]) {
+    const meanPsd = b.power / (b.hi - b.lo);
+    for (const value of [b.name, `${b.lo}-${b.hi}`, formatNumber(b.power, 4), formatNumber(meanPsd, 4), `${formatNumber(b.relative * 100, 2)}%`, `${formatNumber(ratio, 3)}x`]) {
       const td = document.createElement("td"); td.textContent = value; tr.appendChild(td);
     }
     els.bandTable.appendChild(tr);
@@ -397,7 +428,7 @@ function renderChannelGrid() {
     else drawLinePlot(canvas, c.psd.freqs, c.psd.values, "Frequency (Hz)", `${r.unit}²/Hz`, "#3454d1", Math.min(45, r.fs / 2), true);
   }
 }
-function drawLinePlot(canvas, xs, ys, xLabel, yLabel, color, xMax = null, logY = false) {
+function drawLinePlot(canvas, xs, ys, xLabel, yLabel, color, xMax = null, logY = false, markers = []) {
   const ctx = canvas.getContext("2d"), width = canvas.width, height = canvas.height;
   const frequencyAxis = xLabel === "Frequency (Hz)";
   const pad = { l: 92, r: 26, t: 28, b: 58 };
@@ -424,6 +455,21 @@ function drawLinePlot(canvas, xs, ys, xLabel, yLabel, color, xMax = null, logY =
     connected = true;
   }
   ctx.stroke();
+  for (const marker of markers) {
+    if (!Number.isFinite(marker.x) || marker.x < xMin || marker.x > xHi) continue;
+    const x = scale(marker.x, xMin, xHi, pad.l, width - pad.r);
+    ctx.save();
+    ctx.strokeStyle = "#c2410c";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 7]);
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, height - pad.b); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#c2410c";
+    ctx.font = "700 18px Segoe UI";
+    ctx.textAlign = x > width - 220 ? "right" : "left";
+    ctx.fillText(marker.label, x + (x > width - 220 ? -8 : 8), pad.t + 22);
+    ctx.restore();
+  }
 }
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[ch]));
@@ -444,11 +490,12 @@ function exportSummary() {
   if (!state.result) return;
   const r = state.result;
   const ref = mainBandConfig();
-  const rows = [...metadataRows(), ["channel", "electrode", "segments", "used_samples", "invalid_samples", "artifact_samples", "excluded_samples", "filtered_rms", "alpha_peak_hz", "reference_power", "band", "power", "relative", "ratio_to_reference"]];
+  const rows = [...metadataRows(), ["channel", "electrode", "segments", "used_samples", "invalid_samples", "artifact_samples", "excluded_samples", "filtered_rms", "alpha_peak_hz", "dominant_peak_1_45_hz", "reference_power", "band", "power", "mean_psd_per_hz", "relative", "ratio_to_reference"]];
   const selectedChannels = r.channels.filter(c => state.includedChannels.has(c.channelName));
   for (const c of [...selectedChannels, r.mean, r.sum]) {
     const refPower = bandPowerFromPsd(c, ref.lo, ref.hi);
-    for (const b of c.powers) rows.push([c.channelName, c.aggregate ? "" : state.electrodeLabels[c.channelName] || "", c.psd.segments ?? "", c.psd.usedSamples, c.invalid ?? "", c.artifact ?? "", c.aggregate ? "" : r.rows - c.psd.usedSamples, Number.isFinite(c.rms) ? c.rms : "", Number.isFinite(c.alphaPeak.freq) ? c.alphaPeak.freq : "", Number.isFinite(refPower) ? refPower : "", b.name, c.aggregate || c.psd.segments ? b.power : "", c.aggregate || c.psd.segments ? b.relative : "", refPower > 0 ? b.power / refPower : ""]);
+    const peak = dominantPeak(c);
+    for (const b of c.powers) rows.push([c.channelName, c.aggregate ? "" : state.electrodeLabels[c.channelName] || "", c.psd.segments ?? "", c.psd.usedSamples, c.invalid ?? "", c.artifact ?? "", c.aggregate ? "" : r.rows - c.psd.usedSamples, Number.isFinite(c.rms) ? c.rms : "", Number.isFinite(c.alphaPeak.freq) ? c.alphaPeak.freq : "", Number.isFinite(peak.freq) ? peak.freq : "", Number.isFinite(refPower) ? refPower : "", b.name, c.aggregate || c.psd.segments ? b.power : "", c.aggregate || c.psd.segments ? b.power / (b.hi - b.lo) : "", c.aggregate || c.psd.segments ? b.relative : "", refPower > 0 ? b.power / refPower : ""]);
   }
   download(rows, "eeg_summary");
 }
@@ -531,7 +578,7 @@ function parseCsvRow(line) {
   return values;
 }
 
-function drawBars(canvas, bands, relative) {
+function drawBars(canvas, bands, config) {
   const ctx = canvas.getContext("2d");
   const width = canvas.width;
   const height = canvas.height;
@@ -539,14 +586,17 @@ function drawBars(canvas, bands, relative) {
   ctx.fillStyle = "#fbfcfd";
   ctx.fillRect(0, 0, width, height);
   const pad = { l: 54, r: 24, t: 28, b: 66 };
-  const max = Math.max(...bands.map((b) => relative ? b.relative : b.power), 0.001);
+  const values = bands.map(config.value);
+  const finiteValues = values.filter(value => Number.isFinite(value) && value >= 0);
+  const max = Math.max(...finiteValues, 0.001);
   const gap = 18;
   const barW = (width - pad.l - pad.r - gap * (bands.length - 1)) / bands.length;
   ctx.strokeStyle = "#ccd5df";
   ctx.strokeRect(pad.l, pad.t, width - pad.l - pad.r, height - pad.t - pad.b);
   bands.forEach((band, i) => {
-    const value = relative ? band.relative : band.power;
-    const h = (height - pad.t - pad.b) * value / max;
+    const value = values[i];
+    const plottedValue = Number.isFinite(value) && value >= 0 ? value : 0;
+    const h = (height - pad.t - pad.b) * plottedValue / max;
     const x = pad.l + i * (barW + gap);
     const y = height - pad.b - h;
     ctx.fillStyle = band.color;
@@ -557,8 +607,12 @@ function drawBars(canvas, bands, relative) {
     ctx.fillText(band.name, x + barW / 2, height - 34);
     ctx.fillStyle = "#627082";
     ctx.font = "17px Segoe UI";
-    ctx.fillText(relative ? `${formatNumber(value * 100, 1)}%` : formatNumber(value, 2), x + barW / 2, y - 8);
+    ctx.fillText(config.format(value), x + barW / 2, y - 8);
   });
+  ctx.fillStyle = "#627082";
+  ctx.font = "17px Segoe UI";
+  ctx.textAlign = "right";
+  ctx.fillText(config.unit, width - pad.r, 20);
 }
 
 function clearCanvas(canvas, message) {

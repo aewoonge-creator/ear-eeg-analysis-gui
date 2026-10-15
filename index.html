@@ -153,6 +153,10 @@
           <strong id="metricAlphaPeak">-</strong>
         </article>
         <article>
+          <span>주 Peak (1-45 Hz)</span>
+          <strong id="metricDominantPeak">-</strong>
+        </article>
+        <article>
           <span>Main Band</span>
           <strong id="metricMainBand">-</strong>
         </article>
@@ -186,7 +190,7 @@
         <button class="tab" data-view="filtered">Filtered</button>
         <button class="tab" data-view="fft">FFT</button>
         <button class="tab active" data-view="psd">Welch PSD</button>
-        <button class="tab" data-view="power">Relative Power</button>
+        <button class="tab" data-view="power">Band 분석</button>
       </nav>
 
       <section class="plot-grid">
@@ -196,6 +200,13 @@
             <span id="mainPlotMeta">-</span>
           </header>
           <div id="plotChannelPicker" class="plot-channel-picker" role="group" aria-label="그래프 표시 채널"></div>
+          <div id="bandMetricPicker" class="band-metric-picker" role="group" aria-label="밴드 분석 지표" hidden>
+            <span class="plot-channel-label">표시 지표</span>
+            <button type="button" class="band-metric-button active" data-band-metric="meanPsd" title="대역 적분 Power를 대역폭(Hz)으로 나눈 평균 PSD">평균 PSD/Hz</button>
+            <button type="button" class="band-metric-button" data-band-metric="absolute" title="각 주파수 대역의 PSD 적분값">절대 Power</button>
+            <button type="button" class="band-metric-button" data-band-metric="relative" title="1-45 Hz 전체 Power에서 각 대역이 차지하는 비율">Relative %</button>
+            <button type="button" class="band-metric-button" data-band-metric="ratio" title="설정한 기준 대역 Power로 나눈 값">기준 대비</button>
+          </div>
           <canvas id="mainCanvas" width="1400" height="640"></canvas>
         </article>
         <article class="plot-card compact">
@@ -209,8 +220,9 @@
                 <tr>
                   <th>Band</th>
                   <th>Hz</th>
-                  <th>Power</th>
-                  <th>Relative</th>
+                  <th>절대 Power</th>
+                  <th>평균 PSD/Hz</th>
+                  <th>Relative %</th>
                   <th>기준 대비</th>
                 </tr>
               </thead>
